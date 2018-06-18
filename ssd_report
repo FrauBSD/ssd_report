@@ -1,0 +1,264 @@
+#!/bin/sh
+# -*- tab-width: 4 -*- ;; Emacs
+# vi: set noexpandtab  :: Vi/ViM
+############################################################ IDENT(1)
+#
+# $Title: Script to report on SSD health $
+# $Copyright: 2017-2018 Devin Teske. All rights reserved. $
+# $FrauBSD: ssd_report/ssd_report 2018-06-18 00:56:44 +0000 freebsdfrau $
+#
+############################################################ GLOBALS
+
+pgm="${0##*/}" # Program basename
+
+: ${HOSTNAME:=$( hostname )}
+: ${UNAME_s:=$( uname -s )}
+
+#
+# Global exit status
+#
+SUCCESS=0
+FAILURE=1
+
+#
+# Command-line options
+#
+JSON=	# -j
+
+############################################################ FUNCTIONS
+
+usage()
+{
+	exec >&2
+	echo "Usage: $pgm [-j]"
+	echo "OPTIONS:"
+	local fmt="\t%-10s %s\n"
+	printf "$fmt" "-j" "Enable JSON output."
+	exit $FAILURE
+}
+
+# setvar $var_to_set [$value]
+#
+# Implement setvar for shells unlike FreeBSD sh(1).
+#
+if ! type setvar > /dev/null 2>&1; then
+setvar()
+{
+        [ $# -gt 0 ] || return $SUCCESS
+        local __setvar_var_to_set="$1" __setvar_right="$2" __setvar_left=
+        case $# in
+        1) unset "$__setvar_var_to_set"
+           return $? ;;
+        2) : fall through ;;
+        *) f_err "setvar: too many arguments\n"
+           return $FAILURE
+        esac
+        case "$__setvar_var_to_set" in *[!0-9A-Za-z_]*)
+                f_err "setvar: %s: bad variable name\n" "$__setvar_var_to_set"
+                return 2
+        esac
+        while case "$__setvar_r" in *\'*) : ;; *) false ; esac
+        do
+                __setvar_left="$__setvar_left${__setvar_right%%\'*}'\\''"
+                __setvar_right="${__setvar_right#*\'}"
+        done
+        __setvar_left="$__setvar_left${__setvar_right#*\'}"
+        eval "$__setvar_var_to_set='$__setvar_left'"
+}
+fi
+
+# f_replaceall $string $find $replace [$var_to_set]
+#
+# Replace all occurrences of $find in $string with $replace. If $var_to_set is
+# either missing or NULL, the variable name is produced on standard out for
+# capturing in a sub-shell (which is less recommended due to performance
+# degradation).
+#
+# To replace newlines or a sequence containing the newline character, use $NL
+# as `\n' is not supported.
+#
+f_replaceall()
+{
+        local __left="" __right="$1"
+        local __find="$2" __replace="$3" __var_to_set="$4"
+        while :; do
+                case "$__right" in *$__find*)
+                        __left="$__left${__right%%$__find*}$__replace"
+                        __right="${__right#*$__find}"
+                        continue
+                esac
+                break
+        done
+        __left="$__left${__right#*$__find}"
+        if [ "$__var_to_set" ]; then
+                setvar "$__var_to_set" "$__left"
+        else
+                echo "$__left"
+        fi
+}
+
+############################################################ MAIN
+
+node=$HOSTNAME
+
+#
+# Process command-line options
+#
+while getopts j flag; do
+	case "$flag" in
+	j) JSON=1 ;;
+	*) usage # NOTREACHED
+	esac
+done
+shift $(( $OPTIND - 1 ))
+
+#
+# Get a list of physical disk device names
+#
+case "$UNAME_s" in
+FreeBSD) disks=$( sysctl -n kern.disks ) ;;
+*) disks=$( lsblk | awk '$NF == "disk" { print $1 }' )
+esac
+
+#
+# Describe the OS
+#
+case "$UNAME_s" in
+Linux)
+	if [ -e /etc/centos-release ]; then
+		version=$( cat /etc/centos-release )
+		release=CentOS
+	elif [ -e /etc/redhat-release ]; then
+		version=$( cat /etc/redhat-release )
+		release=RedHat
+	elif [ -e /etc/os-release ]; then
+		. /etc/os-release
+		version="$VERSION"
+		release="${NAME%%[[:space:]]*}"
+	else
+		version="${UNAME_r:-$( uname -r )}"
+		release="$UNAME_s"
+	fi
+	version="${version#"${version%%[0-9]*}"}"
+	version="${version%%[^0-9]*}"
+	release=$release$version
+	;;
+*)
+	version="${UNAME_r:-$( uname -r )}"
+	version="${version%%[^0-9]*}"
+	release="$UNAME_s$version"
+esac
+
+#
+# Operate on each disk device
+#
+if [ "$JSON" ]; then
+	fmt='{"node":"%s","device":"%s","OSRel":"%s","Model":"%s",'
+	fmt="$fmt"'"FwRev":"%s","SerialNo":"%s","LifeRemain":"%s%%",'
+	fmt="$fmt"'"status":"%s","WriteAmp":"%s","PwrDays":"%s",'
+	fmt="$fmt"'"EstDaysToFail":"%s","WritesHost":"%s","WritesFTL":"%s"}'
+else
+	fmt="%s %s OSRel=%s Model=%s FwRev=%s SerialNo=%s"
+	fmt="$fmt LifeRemain=%s%% (%s) WriteAmp=%s PwrDays=%s"
+	fmt="$fmt EstDaysToFail=%s WritesHost=%s WritesFTL=%s"
+fi
+for device in $disks; do
+	#
+	# Get disk device model
+	#
+	case "$UNAME_s" in
+	FreeBSD) device_name=$( smartctl -a /dev/$device 2> /dev/null | awk '
+		sub(/^Device Model:[[:space:]]*/, "") { model = $0 }
+		sub(/^Serial Number:[[:space:]]*/, "") { serialno = $0 }
+		sub(/^Firmware Version:[[:space:]]*/, "") { fwrev = $0 }
+		END { printf " Model=%s, FwRev=%s, SerialNo=%s\n",
+			model, fwrev, serialno }' ) ;;
+	*) device_name=$( hdparm -i /dev/$device 2> /dev/null | awk /Model=/ )
+	esac || continue
+
+	#
+	# Determine the type of disk
+	# NB: Skip non-SSD device models
+	#
+	case "$device_name" in
+	*Crucial*|*Micron*|*MICRON*) device_type=Micron ;;
+	*"INTEL SSD"*) device_type=Intel ;;
+	*) continue
+	esac
+
+	#
+	# Get smart attributes
+	#
+	lifetime=0 writes_host=0 writes_ftl=0 hours=0 wearout=0 days_to_fail=
+	eval "$( echo "${device_name# }" | awk 'gsub(/, /, "\n")||1' |
+		awk 'sub(/=/, "&\"")&&sub(/$/,"\""){}1' )"
+	eval "$( smartctl -A /dev/$device | awk '
+		BEGIN {
+			val[attr[202] = attr[233] = "lifetime"] = 4
+			val[attr[247] = "writes_host"] = 10
+			val[attr[248] = "writes_ftl"] = 10
+			val[attr[9] = "hours"] = 10
+		}
+		var = attr[$1] { _[var] = $val[var] }
+		END { for (var in _) printf "%s=%u\n", var, _[var] }
+	' )"
+
+	#
+	# Determine the number of remaining hours until failure
+	#
+	if [ $lifetime -lt 100 ]; then
+		total_hours_to_fail=$(( ($hours * 100) / (100 - $lifetime) ))
+		hours_to_fail=$(( $total_hours_to_fail - $hours ))
+		days_to_fail=$(( $hours_to_fail / 24 ))
+	fi
+
+	#
+	# Calculate write amplication
+	#
+	case "$device_type" in
+	Micron) write_amp=$( :| awk -v host=$writes_host -v ftl=$writes_ftl \
+		'END { printf "%4.2f\n",
+			(host + ftl) / (host != 0 ? host : 1) }' ) ;;
+	Intel) write_amp=N/A
+	esac
+
+	#
+	# Determine drive status (OK/WARN/CRIT)
+	#
+	good_bad=OK pwr_days=$(( $hours / 24 ))
+	if [ $lifetime -lt 10 ]; then
+		good_bad=CRIT
+	elif [ $lifetime -lt 25 ]; then
+		good_bad=WARN
+	fi
+
+	#
+	# Sanitize fields
+	#
+	f_replaceall "$node"         "[[:space:]]" _ node
+	f_replaceall "$release"      "[[:space:]]" _ release
+	f_replaceall "$device"       "[[:space:]]" _ device
+	f_replaceall "$Model"        "[[:space:]]" _ Model
+	f_replaceall "$FwRev"        "[[:space:]]" _ FwRev
+	f_replaceall "$SerialNo"     "[[:space:]]" _ SerialNo
+	f_replaceall "$lifetime"     "[[:space:]]" _ lifetime
+	f_replaceall "$good_bad"     "[[:space:]]" _ good_bad
+	f_replaceall "$write_amp"    "[[:space:]]" _ write_amp
+	f_replaceall "$pwr_days"     "[[:space:]]" _ pwr_days
+	f_replaceall "$days_to_fail" "[[:space:]]" _ days_to_fail
+	f_replaceall "$writes_host"  "[[:space:]]" _ writes_host
+	f_replaceall "$writes_ftl"   "[[:space:]]" _ writes_ftl
+
+	#
+	# Print drive report
+	#
+	printf "$fmt\n" "$node" "$device" "$release" "$Model" "$FwRev" \
+		"$SerialNo" "$lifetime" "$good_bad" "$write_amp" "$pwr_days" \
+		"${days_to_fail:-N/A}" "$writes_host" "$writes_ftl"
+done
+
+exit $SUCCESS
+
+################################################################################
+# END
+################################################################################
