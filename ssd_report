@@ -5,7 +5,7 @@
 #
 # $Title: Script to report on SSD health $
 # $Copyright: 2017-2018 Devin Teske. All rights reserved. $
-# $FrauBSD: ssd_report/ssd_report 2018-06-18 00:56:44 +0000 freebsdfrau $
+# $FrauBSD: ssd_report/ssd_report 2018-06-18 06:31:13 +0000 freebsdfrau $
 #
 ############################################################ GLOBALS
 
@@ -27,6 +27,10 @@ JSON=	# -j
 
 ############################################################ FUNCTIONS
 
+# usage
+#
+# Display short usage statement on stderr and exit with error status.
+#
 usage()
 {
 	exec >&2
@@ -36,6 +40,103 @@ usage()
 	printf "$fmt" "-j" "Enable JSON output."
 	exit $FAILURE
 }
+
+# device_info device_name
+#
+# The device_name argument can begin with /dev/ or not (up to you). Prints
+# a single line on stdout containing " Model=..., FwRev=..., SerialNo=..."
+# with each value guaranteed to not contain spaces.
+#
+# How this information is acquired depends on whether you have "smart"
+# (preferred if available; Linux/FreeBSD), "smartctl" (FreeBSD/Linux), or
+# "hdparm" (Linux; preferred over smartctl).
+#
+if type smart > /dev/null 2>&1; then # FreeBSD/Linux
+device_info()
+{
+	smart --info "/dev/${1#/dev/}" 2> /dev/null | awk '
+	function _s(s) { gsub(/[[:space:]]+/, "_", s); return s }
+	sub(/^Device[[:space:]]+/, "") { model = _s($0) }
+	sub(/^Serial[[:space:]]+/, "") { serialno = _s($0) }
+	sub(/^Revision[[:space:]]+/, "") { fwrev = _s($0) }
+	END { printf " Model=%s, FwRev=%s, SerialNo=%s\n",
+		model, fwrev, serialno }'
+}
+elif type hdparm > /dev/null 2>&1; then # Linux
+device_info()
+{
+	hdparm -i "/dev/${1#/dev/}" 2> /dev/null | awk /Model=/
+}
+elif type smartctl > /dev/null 2>&1; then # FreeBSD/Linux
+device_info()
+{
+	smartctl -a "/dev/${1#/dev/}" 2> /dev/null | awk '
+	function _s(s) { gsub(/[[:space:]]+/, "_", s); return s }
+	sub(/^Device Model:[[:space:]]*/, "") { model = _s($0) }
+	sub(/^Serial Number:[[:space:]]*/, "") { serialno = _s($0) }
+	sub(/^Firmware Version:[[:space:]]*/, "") { fwrev = _s($0) }
+	END { printf " Model=%s, FwRev=%s, SerialNo=%s\n",
+		model, fwrev, serialno }'
+}
+else
+device_info()
+{
+	return $FAILURE
+}
+fi
+
+# smart_attrs device_name
+#
+# The device_name argument can begin with /dev/ or not (up to you). Prints
+# a series of shell statements that can be evaluated to set the following:
+#
+#	VARIABLE_NAME	DESCRIPTION
+# 	lifetime	Attribute 202 or 233 depending on manufacturer
+# 	writes_host	Attribute 247; number pages written by the host
+# 	writes_ftl	Attribute 248; number pages written by the FTL*
+# 	hours		Attribute 9; number of powered-on hours
+#
+# * The FTL is the Flash Translation Layer (FTL); a component of the SSD
+# controller that maps Logical Block Addresses (LBAs) from host to Physical
+# Block Addresses (PBAs). This is helpful in calculating write amplification.
+#
+# How this information is acquired depends on whether you have "smart"
+# (preferred if available; Linux/FreeBSD), or "smartctl" (FreeBSD/Linux).
+#
+if type smart > /dev/null 2>&1; then # FreeBSD/Linux
+smart_attrs()
+{
+	smart -t "/dev/${1#/dev/}" | awk '
+	BEGIN {
+		val[attr[202] = attr[233] = "lifetime"] = 5
+		val[attr[247] = "writes_host"] = 7
+		val[attr[248] = "writes_ftl"] = 7
+		val[attr[9] = "hours"] = 7
+	}
+	var = attr[$2] { _[var] = $val[var] }
+	END { for (var in _) printf "%s=%u\n", var, _[var] }
+	' # END-QUOTE
+}
+elif type smartctl > /dev/null 2>&1; then # FreeBSD/Linux
+smart_attrs()
+{
+	smartctl -A "/dev/${1#/dev/}" | awk '
+	BEGIN {
+		val[attr[202] = attr[233] = "lifetime"] = 4
+		val[attr[247] = "writes_host"] = 10
+		val[attr[248] = "writes_ftl"] = 10
+		val[attr[9] = "hours"] = 10
+	}
+	var = attr[$1] { _[var] = $val[var] }
+	END { for (var in _) printf "%s=%u\n", var, _[var] }
+	' # END-QUOTE
+}
+else
+smart_attrs()
+{
+	return $FAILURE
+}
+fi
 
 # setvar $var_to_set [$value]
 #
@@ -166,15 +267,7 @@ for device in $disks; do
 	#
 	# Get disk device model
 	#
-	case "$UNAME_s" in
-	FreeBSD) device_name=$( smartctl -a /dev/$device 2> /dev/null | awk '
-		sub(/^Device Model:[[:space:]]*/, "") { model = $0 }
-		sub(/^Serial Number:[[:space:]]*/, "") { serialno = $0 }
-		sub(/^Firmware Version:[[:space:]]*/, "") { fwrev = $0 }
-		END { printf " Model=%s, FwRev=%s, SerialNo=%s\n",
-			model, fwrev, serialno }' ) ;;
-	*) device_name=$( hdparm -i /dev/$device 2> /dev/null | awk /Model=/ )
-	esac || continue
+	device_name=$( device_info /dev/$device ) || continue
 
 	#
 	# Determine the type of disk
@@ -182,26 +275,17 @@ for device in $disks; do
 	#
 	case "$device_name" in
 	*Crucial*|*Micron*|*MICRON*) device_type=Micron ;;
-	*"INTEL SSD"*) device_type=Intel ;;
+	*INTEL*SSD*) device_type=Intel ;;
 	*) continue
 	esac
 
 	#
 	# Get smart attributes
 	#
-	lifetime=0 writes_host=0 writes_ftl=0 hours=0 wearout=0 days_to_fail=
+	lifetime=0 writes_host=0 writes_ftl=0 hours=0 days_to_fail=
 	eval "$( echo "${device_name# }" | awk 'gsub(/, /, "\n")||1' |
 		awk 'sub(/=/, "&\"")&&sub(/$/,"\""){}1' )"
-	eval "$( smartctl -A /dev/$device | awk '
-		BEGIN {
-			val[attr[202] = attr[233] = "lifetime"] = 4
-			val[attr[247] = "writes_host"] = 10
-			val[attr[248] = "writes_ftl"] = 10
-			val[attr[9] = "hours"] = 10
-		}
-		var = attr[$1] { _[var] = $val[var] }
-		END { for (var in _) printf "%s=%u\n", var, _[var] }
-	' )"
+	eval "$( smart_attrs /dev/$device )"
 
 	#
 	# Determine the number of remaining hours until failure
@@ -216,9 +300,18 @@ for device in $disks; do
 	# Calculate write amplication
 	#
 	case "$device_type" in
-	Micron) write_amp=$( :| awk -v host=$writes_host -v ftl=$writes_ftl \
-		'END { printf "%4.2f\n",
-			(host + ftl) / (host != 0 ? host : 1) }' ) ;;
+	Micron)
+		# Micron documents this in their SMART Attribute Reference
+		#
+		# https://www.micron.com/~/media/documents/products/
+		# 	technical-note/solid-state-storage/
+		# 	tnfd22_client_ssd_smart_attributes.pdf
+		#
+		# WAF = (Attrib_247 + Attrib_248) / Attrib_247
+		#
+		write_amp=$( awk -v host=$writes_host -v ftl=$writes_ftl '
+		END { printf "%4.2f\n", (host + ftl) / (host != 0 ? host : 1) }
+		' /dev/null ) ;;
 	Intel) write_amp=N/A
 	esac
 
