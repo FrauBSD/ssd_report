@@ -5,7 +5,7 @@
 #
 # $Title: Script to report on SSD health $
 # $Copyright: 2017-2018 Devin Teske. All rights reserved. $
-# $FrauBSD: ssd_report/ssd_report 2018-06-18 06:31:13 +0000 freebsdfrau $
+# $FrauBSD: ssd_report/ssd_report 2018-06-20 22:48:30 +0000 freebsdfrau $
 #
 ############################################################ GLOBALS
 
@@ -108,12 +108,22 @@ smart_attrs()
 {
 	smart -t "/dev/${1#/dev/}" | awk '
 	BEGIN {
+		val[attr[177] = "wear_leveling_count"] = 7
 		val[attr[202] = attr[233] = "lifetime"] = 5
+		val[attr[241] = "total_lbas_written"] = 7
 		val[attr[247] = "writes_host"] = 7
 		val[attr[248] = "writes_ftl"] = 7
 		val[attr[9] = "hours"] = 7
 	}
-	var = attr[$2] { _[var] = $val[var] }
+	var = attr[at = $2] {
+		_[var] = $val[var]
+
+		#
+		# For Samsung SSDs, attribute 177 normalized value
+		# is documented as percentage remaining P/E cycles
+		#
+		if (at == 177) _["samsung_lifetime"] = $5
+	}
 	END { for (var in _) printf "%s=%u\n", var, _[var] }
 	' # END-QUOTE
 }
@@ -122,12 +132,22 @@ smart_attrs()
 {
 	smartctl -A "/dev/${1#/dev/}" | awk '
 	BEGIN {
+		val[attr[177] = "wear_leveling_count"] = 10
 		val[attr[202] = attr[233] = "lifetime"] = 4
+		val[attr[241] = "total_lbas_written"] = 10
 		val[attr[247] = "writes_host"] = 10
 		val[attr[248] = "writes_ftl"] = 10
 		val[attr[9] = "hours"] = 10
 	}
-	var = attr[$1] { _[var] = $val[var] }
+	var = attr[at = $1] {
+		_[var] = $val[var]
+
+		#
+		# For Samsung SSDs, attribute 177 normalized value
+		# is documented as percentage remaining P/E cycles
+		#
+		if (at == 177) _["samsung_lifetime"] = $5
+	}
 	END { for (var in _) printf "%s=%u\n", var, _[var] }
 	' # END-QUOTE
 }
@@ -137,6 +157,45 @@ smart_attrs()
 	return $FAILURE
 }
 fi
+
+# user_capacity device_name
+#
+# Get the user capacity of a disk drive in bytes.
+#
+case "$UNAME_s" in
+*BSD)
+user_capacity()
+{
+	sysctl -n kern.geom.conftxt | awk -v disk="${1#/dev/}" '
+		$2 == "DISK" && $3 == disk { print mediasize = $4; exit }
+		END { exit mediasize == "" ? 1 : 0 }
+	' # END-QUOTE
+}
+;;
+*)
+user_capacity()
+{
+	lsblk -b | awk -v disk="${1#/dev/}" '
+		BEGIN { getline } # Skip header
+		$1 == disk { print mediasize = $4; exit }
+		END { exit mediasize == "" ? 1 : 0 }
+	' # END-QUOTE
+}
+esac
+
+# user2phys bytes
+#
+# Converts device user capacity to drive physical capacity.
+# NB: Specific to calculating WAF and lifetime on Samsung SSDs.
+#
+user2phys()
+{
+	local n=1 user="${1:-0}"
+	while [ $n -lt $user ]; do
+		n=$(( $n * 2 ))
+	done
+	echo $n
+}
 
 # setvar $var_to_set [$value]
 #
@@ -275,6 +334,7 @@ for device in $disks; do
 	#
 	case "$device_name" in
 	*Crucial*|*Micron*|*MICRON*) device_type=Micron ;;
+	*SAMSUNG*) device_type=Samsung ;;
 	*INTEL*SSD*) device_type=Intel ;;
 	*) continue
 	esac
@@ -290,6 +350,9 @@ for device in $disks; do
 	#
 	# Determine the number of remaining hours until failure
 	#
+	case "$device_type" in
+	Samsung) lifetime="$samsung_lifetime" ;;
+	esac
 	if [ $lifetime -lt 100 ]; then
 		total_hours_to_fail=$(( ($hours * 100) / (100 - $lifetime) ))
 		hours_to_fail=$(( $total_hours_to_fail - $hours ))
@@ -307,10 +370,30 @@ for device in $disks; do
 		# 	technical-note/solid-state-storage/
 		# 	tnfd22_client_ssd_smart_attributes.pdf
 		#
-		# WAF = (Attrib_247 + Attrib_248) / Attrib_247
+		#        (Attrib_247 + Attrib_248)
+		# WAF = ---------------------------
+		#                Attrib_247
 		#
 		write_amp=$( awk -v host=$writes_host -v ftl=$writes_ftl '
 		END { printf "%4.2f\n", (host + ftl) / (host != 0 ? host : 1) }
+		' /dev/null ) ;;
+	Samsung)
+		# Samsung documents this in article published May 20, 2016:
+		#
+		# "Estimating SSD Endurance With SMART Attributes"
+		# https://insights.samsung.com/2016/05/20/
+		# 	estimating-ssd-endurance-with-smart-attributes/
+		#
+		#        Attrib_177 * Capacity
+		# WAF = -----------------------
+		#          Attrib_241 * 512
+		#
+		user_cap=$( user_capacity $device )
+		phys_cap=$( user2phys $user_cap )
+		writes_ftl=$(( $wear_leveling_count * $phys_cap ))
+		writes_host=$(( $total_lbas_written * 512 ))
+		write_amp=$( awk -v host=$writes_host -v ftl=$writes_ftl '
+		END { printf "%4.2f\n", ftl / (host != 0 ? host : 1) }
 		' /dev/null ) ;;
 	Intel) write_amp=N/A
 	esac
