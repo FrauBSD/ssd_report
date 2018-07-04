@@ -1,6 +1,6 @@
-[//]: # ($FrauBSD: ssd_report/README.md 2018-06-18 00:43:38 +0000 freebsdfrau $)
+[//]: # ($FrauBSD: ssd_report/README.md 2018-07-04 06:46:46 +0000 freebsdfrau $)
 
-# ssd\_report
+# Welcome to [FrauBSD.org/ssd\_report](https://fraubsd.org/ssd_report)!
 
 Report SSD health by looking at SMART data
 
