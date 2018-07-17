@@ -5,7 +5,7 @@
 #
 # $Title: Script to report on SSD health $
 # $Copyright: 2017-2018 Devin Teske. All rights reserved. $
-# $FrauBSD: ssd_report/ssd_report 2018-06-20 22:48:30 +0000 freebsdfrau $
+# $FrauBSD: ssd_report/ssd_report 2018-07-17 07:08:28 -0700 freebsdfrau $
 #
 ############################################################ GLOBALS
 
@@ -108,7 +108,7 @@ smart_attrs()
 {
 	smart -t "/dev/${1#/dev/}" | awk '
 	BEGIN {
-		val[attr[177] = "wear_leveling_count"] = 7
+		val[attr[173] = sttr[177] = "wear_leveling_count"] = 7
 		val[attr[202] = attr[233] = "lifetime"] = 5
 		val[attr[241] = "total_lbas_written"] = 7
 		val[attr[247] = "writes_host"] = 7
@@ -119,10 +119,10 @@ smart_attrs()
 		_[var] = $val[var]
 
 		#
-		# For Samsung SSDs, attribute 177 normalized value
+		# For Samsung SSDs, attribute 173/177 normalized value
 		# is documented as percentage remaining P/E cycles
 		#
-		if (at == 177) _["samsung_lifetime"] = $5
+		if (at == 173 || at == 177) _["samsung_lifetime"] = $5
 	}
 	END { for (var in _) printf "%s=%u\n", var, _[var] }
 	' # END-QUOTE
@@ -132,7 +132,7 @@ smart_attrs()
 {
 	smartctl -A "/dev/${1#/dev/}" | awk '
 	BEGIN {
-		val[attr[177] = "wear_leveling_count"] = 10
+		val[attr[173] = attr[177] = "wear_leveling_count"] = 10
 		val[attr[202] = attr[233] = "lifetime"] = 4
 		val[attr[241] = "total_lbas_written"] = 10
 		val[attr[247] = "writes_host"] = 10
@@ -143,10 +143,10 @@ smart_attrs()
 		_[var] = $val[var]
 
 		#
-		# For Samsung SSDs, attribute 177 normalized value
+		# For Samsung SSDs, attribute 173/177 normalized value
 		# is documented as percentage remaining P/E cycles
 		#
-		if (at == 177) _["samsung_lifetime"] = $5
+		if (at == 173 || at == 177) _["samsung_lifetime"] = $5
 	}
 	END { for (var in _) printf "%s=%u\n", var, _[var] }
 	' # END-QUOTE
@@ -387,6 +387,8 @@ for device in $disks; do
 		#        Attrib_177 * Capacity
 		# WAF = -----------------------
 		#          Attrib_241 * 512
+		#
+		# NB: On some models, wear_leveling_count is Attrib_173
 		#
 		user_cap=$( user_capacity $device )
 		phys_cap=$( user2phys $user_cap )
