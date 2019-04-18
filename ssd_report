@@ -4,7 +4,7 @@
 ############################################################ IDENT(1)
 #
 # $Title: Script to report on SSD health $
-# $Copyright: 2017-2018 Devin Teske. All rights reserved. $
+# $Copyright: 2017-2019 Devin Teske. All rights reserved. $
 # $FrauBSD: ssd_report/ssd_report 2018-07-17 07:08:28 -0700 freebsdfrau $
 #
 ############################################################ GLOBALS
@@ -62,11 +62,6 @@ device_info()
 	END { printf " Model=%s, FwRev=%s, SerialNo=%s\n",
 		model, fwrev, serialno }'
 }
-elif type hdparm > /dev/null 2>&1; then # Linux
-device_info()
-{
-	hdparm -i "/dev/${1#/dev/}" 2> /dev/null | awk /Model=/
-}
 elif type smartctl > /dev/null 2>&1; then # FreeBSD/Linux
 device_info()
 {
@@ -77,6 +72,11 @@ device_info()
 	sub(/^Firmware Version:[[:space:]]*/, "") { fwrev = _s($0) }
 	END { printf " Model=%s, FwRev=%s, SerialNo=%s\n",
 		model, fwrev, serialno }'
+}
+elif type hdparm > /dev/null 2>&1; then # Linux
+device_info()
+{
+	hdparm -i "/dev/${1#/dev/}" 2> /dev/null | awk /Model=/
 }
 else
 device_info()
@@ -334,7 +334,7 @@ for device in $disks; do
 	#
 	case "$device_name" in
 	*Crucial*|*Micron*|*MICRON*) device_type=Micron ;;
-	*SAMSUNG*) device_type=Samsung ;;
+	*SAMSUNG*|*Samsung*) device_type=Samsung ;;
 	*INTEL*SSD*) device_type=Intel ;;
 	*) continue
 	esac
