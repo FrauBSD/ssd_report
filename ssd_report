@@ -5,9 +5,11 @@
 #
 # $Title: Script to report on SSD health $
 # $Copyright: 2017-2019 Devin Teske. All rights reserved. $
-# $FrauBSD: //github.com/FrauBSD/ssd_report/ssd_report 2019-09-12 17:02:48 -0700 freebsdfrau $
+# $FrauBSD: ssd_report/ssd_report 2019-09-12 19:07:16 -0700 freebsdfrau $
 #
 ############################################################ GLOBALS
+
+VERSION='$Version: 0.4 $'
 
 pgm="${0##*/}" # Program basename
 
@@ -24,6 +26,7 @@ FAILURE=1
 # Command-line options
 #
 JSON=	# -j
+PERL=	# -p
 
 ############################################################ FUNCTIONS
 
@@ -34,10 +37,12 @@ JSON=	# -j
 usage()
 {
 	exec >&2
-	echo "Usage: $pgm [-j]"
+	echo "Usage: $pgm [-jpv]"
 	echo "OPTIONS:"
 	local fmt="\t%-10s %s\n"
 	printf "$fmt" "-j" "Enable JSON output."
+	printf "$fmt" "-p" "Enable Perl output."
+	printf "$fmt" "-v" "Print version and exit."
 	exit $FAILURE
 }
 
@@ -264,9 +269,13 @@ node=$HOSTNAME
 #
 # Process command-line options
 #
-while getopts j flag; do
+while getopts jpv flag; do
 	case "$flag" in
-	j) JSON=1 ;;
+	j) JSON=1 PERL= ;;
+	p) PERL=1 JSON= ;;
+	v) VERSION="${VERSION#*: }"
+	   echo "${VERSION% \$}"
+	   exit $SUCCESS ;;
 	*) usage # NOTREACHED
 	esac
 done
@@ -317,6 +326,11 @@ if [ "$JSON" ]; then
 	fmt="$fmt"'"FwRev":"%s","SerialNo":"%s","LifeRemain":"%s%%",'
 	fmt="$fmt"'"status":"%s","WriteAmp":"%s","PwrDays":"%s",'
 	fmt="$fmt"'"EstDaysToFail":"%s","WritesHost":"%s","WritesFTL":"%s"}'
+elif [ "$PERL" ]; then
+	fmt='{"node"=>"%s","device"=>"%s","OSRel"=>"%s","Model"=>"%s",'
+	fmt="$fmt"'"FwRev"=>"%s","SerialNo"=>"%s","LifeRemain"=>"%s%%",'
+	fmt="$fmt"'"status"=>"%s","WriteAmp"=>"%s","PwrDays"=>"%s",'
+	fmt="$fmt"'"EstDaysToFail"=>"%s","WritesHost"=>"%s","WritesFTL"=>"%s"}'
 else
 	fmt="%s %s OSRel=%s Model=%s FwRev=%s SerialNo=%s"
 	fmt="$fmt LifeRemain=%s%% (%s) WriteAmp=%s PwrDays=%s"
