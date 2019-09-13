@@ -5,7 +5,7 @@
 #
 # $Title: Script to report on SSD health $
 # $Copyright: 2017-2019 Devin Teske. All rights reserved. $
-# $FrauBSD: ssd_report/ssd_report 2018-07-17 07:08:28 -0700 freebsdfrau $
+# $FrauBSD: //github.com/FrauBSD/ssd_report/ssd_report 2019-09-12 17:02:48 -0700 freebsdfrau $
 #
 ############################################################ GLOBALS
 
@@ -277,7 +277,7 @@ shift $(( $OPTIND - 1 ))
 #
 case "$UNAME_s" in
 FreeBSD) disks=$( sysctl -n kern.disks ) ;;
-*) disks=$( lsblk | awk '$NF == "disk" { print $1 }' )
+*) disks=$( lsblk | awk '$6 == "disk" { print $1 }' )
 esac
 
 #
